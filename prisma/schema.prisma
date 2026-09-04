@@ -1,0 +1,311 @@
+// Core domain model for the AI-Powered Content Repurposing Tool.
+// Mirrors section 5 ("Core Domain Model") of the architecture doc:
+// source media is kept separate from derived artifacts, and mutable
+// user-facing artifacts are versioned so edits and generation prompts
+// stay auditable and regenerable.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  owner
+  admin
+  editor
+  viewer
+}
+
+enum MembershipStatus {
+  active
+  invited
+  suspended
+}
+
+enum ProjectStatus {
+  draft
+  processing
+  ready
+  failed
+}
+
+enum MediaFileKind {
+  source
+  proxy
+  rendered
+}
+
+enum MediaFileStatus {
+  uploading
+  uploaded
+  validating
+  normalized
+  failed
+}
+
+enum InsightType {
+  theme
+  quote
+  hook
+  clip_candidate
+  chapter
+  call_to_action
+  claim
+}
+
+enum ArtifactType {
+  blog_post
+  social_caption
+  title
+  summary
+  chapter_list
+  short_video
+  quote_card
+  metadata
+}
+
+enum ArtifactStatus {
+  draft
+  generating
+  ready
+  failed
+}
+
+enum JobStatus {
+  queued
+  running
+  succeeded
+  failed
+  retrying
+  dead_letter
+}
+
+enum UsageEventType {
+  transcription_minutes
+  generation_call
+  render_minutes
+  export_bytes
+  storage_bytes
+}
+
+enum ExportStatus {
+  pending
+  ready
+  failed
+}
+
+// Billing and tenancy boundary. Every other resource carries a
+// workspaceId so tenant isolation can be enforced and tested at the
+// query boundary.
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  planId    String   @map("plan_id")
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  memberships Membership[]
+  projects    Project[]
+  mediaFiles  MediaFile[]
+  usageEvents UsageEvent[]
+  exports     Export[]
+
+  @@map("workspaces")
+}
+
+model Membership {
+  id          String           @id @default(cuid())
+  workspaceId String           @map("workspace_id")
+  userId      String           @map("user_id")
+  role        Role
+  status      MembershipStatus @default(active)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@map("memberships")
+}
+
+// A source episode or long-form recording.
+model Project {
+  id             String        @id @default(cuid())
+  workspaceId    String        @map("workspace_id")
+  title          String
+  status         ProjectStatus @default(draft)
+  sourceMediaId  String?       @map("source_media_id")
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  workspace  Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceMedia MediaFile?       @relation(fields: [sourceMediaId], references: [id])
+  transcript Transcript?
+  insights   Insight[]
+  artifacts  ContentArtifact[]
+  exports    Export[]
+
+  @@index([workspaceId])
+  @@map("projects")
+}
+
+// Uploaded, imported, proxy, or rendered media. The original object
+// should remain immutable once normalized.
+model MediaFile {
+  id          String           @id @default(cuid())
+  workspaceId String           @map("workspace_id")
+  kind        MediaFileKind
+  storageKey  String           @map("storage_key")
+  mimeType    String           @map("mime_type")
+  durationMs  Int?             @map("duration_ms")
+  checksum    String?
+  status      MediaFileStatus  @default(uploading)
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projects  Project[]
+
+  @@index([workspaceId])
+  @@index([checksum])
+  @@map("media_files")
+}
+
+// Full speech-to-text result for a project. One transcript per project;
+// TranscriptSegment rows hold the searchable timed units.
+model Transcript {
+  id         String   @id @default(cuid())
+  projectId  String   @unique @map("project_id")
+  provider   String
+  language   String
+  confidence Float?
+
+  project  Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  segments TranscriptSegment[]
+
+  @@map("transcripts")
+}
+
+model TranscriptSegment {
+  id           String  @id @default(cuid())
+  transcriptId String  @map("transcript_id")
+  startMs      Int     @map("start_ms")
+  endMs        Int     @map("end_ms")
+  text         String
+  speaker      String?
+
+  transcript Transcript @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+
+  @@index([transcriptId, startMs])
+  @@map("transcript_segments")
+}
+
+// Extracted theme, hook, quote, or candidate moment. Retains references
+// to the exact transcript segments that support it (provenance).
+model Insight {
+  id        String      @id @default(cuid())
+  projectId String      @map("project_id")
+  type      InsightType
+  startMs   Int         @map("start_ms")
+  endMs     Int         @map("end_ms")
+  score     Float
+  rationale String
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, type])
+  @@map("insights")
+}
+
+// Blog, caption, title, quote, or short-video draft. Immutable
+// ArtifactVersion rows hold the actual generated/edited content.
+model ContentArtifact {
+  id               String         @id @default(cuid())
+  projectId        String         @map("project_id")
+  type             ArtifactType
+  status           ArtifactStatus @default(draft)
+  sourceRefs       String[]       @map("source_refs")
+  currentVersionId String?        @unique @map("current_version_id")
+
+  project        Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions       ArtifactVersion[] @relation("ArtifactVersions")
+  currentVersion ArtifactVersion?  @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  renderJobs     RenderJob[]
+
+  @@index([projectId, type])
+  @@map("content_artifacts")
+}
+
+model ArtifactVersion {
+  id         String   @id @default(cuid())
+  artifactId String   @map("artifact_id")
+  body       Json
+  parameters Json     @default("{}")
+  model      String?
+  createdBy  String   @map("created_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  artifact ContentArtifact @relation("ArtifactVersions", fields: [artifactId], references: [id], onDelete: Cascade)
+  current  ContentArtifact? @relation("CurrentVersion")
+
+  @@index([artifactId])
+  @@map("artifact_versions")
+}
+
+// Requested video or audio transformation for a short-video artifact.
+model RenderJob {
+  id            String    @id @default(cuid())
+  artifactId    String    @map("artifact_id")
+  template      String
+  status        JobStatus @default(queued)
+  outputMediaId String?   @map("output_media_id")
+
+  artifact ContentArtifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+
+  @@index([artifactId])
+  @@map("render_jobs")
+}
+
+// Billable or quota-relevant activity. idempotencyKey prevents a retry
+// from double-charging usage.
+model UsageEvent {
+  id             String         @id @default(cuid())
+  workspaceId    String         @map("workspace_id")
+  eventType      UsageEventType @map("event_type")
+  quantity       Float
+  idempotencyKey String         @unique @map("idempotency_key")
+  createdAt      DateTime       @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, eventType])
+  @@map("usage_events")
+}
+
+// Downloadable package or publishing attempt.
+model Export {
+  id          String       @id @default(cuid())
+  workspaceId String       @map("workspace_id")
+  projectId   String       @map("project_id")
+  status      ExportStatus @default(pending)
+  manifestKey String?      @map("manifest_key")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@map("exports")
+}
+
+// External event for billing or integrations. eventId + provider is
+// unique so webhook signature replays cannot be processed twice.
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  eventId     String    @map("event_id")
+  payloadHash String    @map("payload_hash")
+  processedAt DateTime? @map("processed_at")
+
+  @@unique([provider, eventId])
+  @@map("webhook_events")
+}
