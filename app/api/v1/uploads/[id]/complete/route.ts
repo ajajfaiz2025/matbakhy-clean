@@ -3,13 +3,12 @@ import { db } from '../../../../../../lib/db';
 import { storage } from '../../../../../../lib/storage';
 import { resolveWorkspaceContext, WorkspaceAuthError } from '../../../../../../lib/workspace';
 import { recordUsage } from '../../../../../../lib/entitlements';
+import { enqueuePipelineJob } from '../../../../../../lib/queue';
 
 // POST /api/v1/uploads/{id}/complete — the API verifies the object
 // through a storage head request rather than trusting the client
-// (section 6.1). A real deployment enqueues the normalization worker
-// here (FFmpeg validation, proxy generation); that queue integration
-// is scaffolded for a later roadmap phase, so this stub marks the
-// MediaFile "uploaded" synchronously.
+// (section 6.1), then enqueues the normalization worker (FFmpeg
+// validation + metadata extraction) instead of doing that work inline.
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const context = await resolveWorkspaceContext(request);
@@ -30,8 +29,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     const updated = await db.mediaFile.update({
       where: { id },
-      // TODO(phase 1): transition to "validating" and enqueue the FFmpeg
-      // normalization job instead of jumping straight to "uploaded".
       data: { status: 'uploaded' },
     });
 
@@ -39,7 +36,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       await recordUsage(context.workspaceId, 'storage_bytes', head.sizeBytes, `media-upload:${mediaFile.id}`);
     }
 
-    return NextResponse.json({ mediaFile: updated });
+    const job = await enqueuePipelineJob({
+      workspaceId: context.workspaceId,
+      mediaFileId: mediaFile.id,
+      type: 'normalization',
+      idempotencyKey: `normalize-${mediaFile.id}`,
+      data: { mediaFileId: mediaFile.id },
+    });
+
+    return NextResponse.json({ mediaFile: updated, jobId: job.id });
   } catch (error) {
     if (error instanceof WorkspaceAuthError) {
       return NextResponse.json({ error: error.message }, { status: error.status });

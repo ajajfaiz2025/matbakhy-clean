@@ -15,15 +15,19 @@ A [Next.js](https://nextjs.org) app. It currently contains two things:
 ## Getting started
 
 ```bash
-cp .env.example .env   # fill in OPENROUTER_API_KEY and DATABASE_URL
+cp .env.example .env   # fill in OPENROUTER_API_KEY, DATABASE_URL, REDIS_URL
 npm install
 npm run db:generate    # generate the Prisma client
 npm run db:migrate     # create the database schema (needs a running Postgres)
 npm run db:seed        # create a dev workspace + membership
-npm run dev
+npm run dev             # the Next.js app (control plane)
+npm run worker          # the pipeline worker (media-processing plane), separately
 ```
 
-Open [http://localhost:3000](http://localhost:3000) for the recipe bot UI.
+Open [http://localhost:3000](http://localhost:3000) for the recipe bot UI. The worker
+needs a running Redis (`REDIS_URL`) and requires `ffmpeg`/`ffprobe` on its `PATH`
+for the normalization stage to succeed — without it, normalization jobs retry
+with backoff and land in `dead_letter` (see "Known stubs" below).
 
 ## Roadmap status (content-repurposing tool)
 
@@ -40,7 +44,17 @@ Following the recommended first implementation sequence in
       `PUT /api/v1/uploads/blob`, `POST /api/v1/uploads/{id}/complete`.
       Storage is a local-filesystem dev implementation; swap for an
       S3-compatible provider before production.
-- [ ] 4. Queue-backed normalization and transcription pipeline.
+- [x] 4. Queue-backed normalization and transcription pipeline —
+      `lib/queue.ts` (BullMQ/Redis, idempotent enqueue, retry + dead-letter),
+      `lib/pipeline/normalizeMedia.ts` (checksum + ffprobe duration),
+      `lib/pipeline/transcribeMedia.ts` + `lib/transcription/*` (provider
+      abstraction: a working mock provider, plus an untested OpenAI Whisper
+      provider), `workers/main.ts` (standalone worker process),
+      `POST /api/v1/projects/{id}/transcription`, `GET /api/v1/jobs/{id}`.
+      Verified end to end against a real local Postgres + Redis: upload →
+      normalize (retries and dead-letters correctly without FFmpeg
+      installed) → (simulated normalized media) → transcribe (mock
+      provider) → transcript persisted → project marked `ready`.
 - [ ] 5. Transcript viewer with timestamp navigation.
 - [ ] 6. Schema-validated insight extraction with provenance references.
 - [ ] 7. Blog draft + caption set as versioned artifacts.
@@ -59,9 +73,15 @@ schedule since they only depend on steps 1–3.
 - **Object storage** (`lib/storage.ts`): writes to `.data/storage` on local
   disk and proxies "signed URLs" through a Next.js route. Replace with an
   S3-compatible provider and real short-lived signed URLs.
-- **Job queue**: none yet. Steps 4, 6, 7, 8 need a queue-backed worker
-  (BullMQ/Temporal per the architecture doc) rather than synchronous
-  request handling.
+- **FFmpeg**: `lib/pipeline/normalizeMedia.ts` shells out to `ffprobe` for
+  duration extraction. If it's missing from `PATH`, the job retries with
+  backoff and lands in `dead_letter` rather than falsely marking the media
+  "normalized" — install FFmpeg on the worker host to fix this for real.
+- **Transcription provider**: `lib/transcription/openaiProvider.ts` is
+  implemented but has not been exercised against a real OpenAI API key in
+  this environment. Without `OPENAI_API_KEY` set, the pipeline uses the
+  deterministic mock provider (`lib/transcription/mockProvider.ts`), which
+  does not perform real speech recognition.
 - **Billing**: `PLAN_LIMITS` in `lib/entitlements.ts` is a hardcoded
   placeholder until step 10 wires up a real subscription-billing provider.
 
@@ -82,11 +102,20 @@ curl -X PUT "localhost:3000$UPLOAD_URL" --data-binary @episode.mp4
 curl -X POST "localhost:3000/api/v1/uploads/$MEDIA_FILE_ID/complete" \
   -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
 
-# 4. Create a project from it
+# 4. Create a project from it (requires the source media to have
+#    reached "normalized" — check via GET /api/v1/jobs/{jobId})
 curl -X POST localhost:3000/api/v1/projects \
   -H 'content-type: application/json' \
   -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user' \
   -d '{"title":"My Episode","sourceMediaId":"'"$MEDIA_FILE_ID"'"}'
+
+# 5. Start transcription
+curl -X POST "localhost:3000/api/v1/projects/$PROJECT_ID/transcription" \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
+
+# 6. Poll job status
+curl "localhost:3000/api/v1/jobs/$JOB_ID" \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
 ```
 
 ## Learn more (Next.js)

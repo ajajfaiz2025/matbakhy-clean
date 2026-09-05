@@ -83,6 +83,12 @@ enum JobStatus {
   dead_letter
 }
 
+enum PipelineJobType {
+  normalization
+  transcription
+  analysis
+}
+
 enum UsageEventType {
   transcription_minutes
   generation_call
@@ -107,11 +113,12 @@ model Workspace {
   settings  Json     @default("{}")
   createdAt DateTime @default(now()) @map("created_at")
 
-  memberships Membership[]
-  projects    Project[]
-  mediaFiles  MediaFile[]
-  usageEvents UsageEvent[]
-  exports     Export[]
+  memberships  Membership[]
+  projects     Project[]
+  mediaFiles   MediaFile[]
+  usageEvents  UsageEvent[]
+  exports      Export[]
+  pipelineJobs PipelineJob[]
 
   @@map("workspaces")
 }
@@ -168,6 +175,32 @@ model MediaFile {
   @@index([workspaceId])
   @@index([checksum])
   @@map("media_files")
+}
+
+// Generic asynchronous pipeline job (section 6-8): normalization,
+// transcription, and analysis stages all report through this table so
+// GET /api/v1/jobs/{id} has one place to read progress, retries, and
+// dead-letter state from, regardless of which stage produced it.
+model PipelineJob {
+  id             String          @id @default(cuid())
+  workspaceId    String          @map("workspace_id")
+  projectId      String?         @map("project_id")
+  mediaFileId    String?         @map("media_file_id")
+  type           PipelineJobType
+  status         JobStatus       @default(queued)
+  progress       Float           @default(0)
+  attempt        Int             @default(0)
+  idempotencyKey String          @unique @map("idempotency_key")
+  messageCode    String?         @map("message_code")
+  error          String?
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([projectId])
+  @@map("pipeline_jobs")
 }
 
 // Full speech-to-text result for a project. One transcript per project;
