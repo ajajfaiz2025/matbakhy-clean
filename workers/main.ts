@@ -1,18 +1,20 @@
 import 'dotenv/config';
+import { extractInsights } from '../lib/pipeline/extractInsights';
 import { normalizeMedia } from '../lib/pipeline/normalizeMedia';
 import { transcribeMedia } from '../lib/pipeline/transcribeMedia';
 import { startPipelineWorker } from '../lib/queue';
 
 // Standalone media-processing-plane entrypoint (section 4): run with
 // `npm run worker`, separately from the Next.js API process, so
-// long-running FFmpeg/transcription work can't degrade request
-// latency and each plane can scale independently.
+// long-running FFmpeg/transcription/analysis work can't degrade
+// request latency and each plane can scale independently.
 const worker = startPipelineWorker({
   normalization: normalizeMedia,
   transcription: transcribeMedia,
+  analysis: extractInsights,
 });
 
-console.log('Pipeline worker started — listening for normalization/transcription jobs.');
+console.log('Pipeline worker started — listening for normalization/transcription/analysis jobs.');
 
 async function shutdown() {
   await worker.close();

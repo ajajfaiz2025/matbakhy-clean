@@ -67,7 +67,10 @@ export function startPipelineWorker(handlers: PipelineHandlers): Worker {
       if (!handler) {
         throw new Error(`No handler registered for pipeline job type "${job.name}"`);
       }
-      await db.pipelineJob.update({
+      // updateMany rather than update: a job can outlive its
+      // PipelineJob row (e.g. the project/workspace was deleted while
+      // the job sat in the queue) and that must not crash the worker.
+      await db.pipelineJob.updateMany({
         where: { idempotencyKey: job.id! },
         data: { status: 'running', attempt: job.attemptsMade + 1 },
       });
@@ -78,7 +81,7 @@ export function startPipelineWorker(handlers: PipelineHandlers): Worker {
 
   worker.on('completed', (job) => {
     db.pipelineJob
-      .update({ where: { idempotencyKey: job.id! }, data: { status: 'succeeded', progress: 1 } })
+      .updateMany({ where: { idempotencyKey: job.id! }, data: { status: 'succeeded', progress: 1 } })
       .catch((error) => console.error('Failed to record job completion', error));
   });
 
@@ -86,7 +89,7 @@ export function startPipelineWorker(handlers: PipelineHandlers): Worker {
     if (!job?.id) return;
     const willRetry = job.attemptsMade < (job.opts.attempts ?? 1);
     db.pipelineJob
-      .update({
+      .updateMany({
         where: { idempotencyKey: job.id },
         data: { status: willRetry ? 'retrying' : 'dead_letter', error: error.message.slice(0, 2000) },
       })

@@ -100,6 +100,7 @@ export type Transcript = z.infer<typeof transcriptSchema>;
 
 export const insightTypeSchema = z.enum([
   'theme',
+  'key_point',
   'quote',
   'hook',
   'clip_candidate',
@@ -113,14 +114,17 @@ export const insightSchema = z.object({
   id: z.string(),
   projectId: z.string(),
   type: insightTypeSchema,
+  text: z.string(),
   startMs: z.number().int().nonnegative(),
   endMs: z.number().int().nonnegative(),
-  score: z.number().min(0).max(1),
-  rationale: z.string(),
+  segmentIds: z.array(z.string()),
+  score: z.number().min(0).max(1).nullable(),
+  rationale: z.string().nullable(),
 });
 export type Insight = z.infer<typeof insightSchema>;
 
 export const artifactTypeSchema = z.enum([
+  'editorial_brief',
   'blog_post',
   'social_caption',
   'title',
@@ -237,3 +241,120 @@ export const jobEventSchema = z.object({
   occurredAt: z.coerce.date(),
 });
 export type JobEvent = z.infer<typeof jobEventSchema>;
+
+/**
+ * Supported first-class languages for insight extraction and the
+ * editorial brief (section 6.4: Arabic is treated as a first-class
+ * language, not a translation target of English output).
+ */
+export const supportedLanguageSchema = z.enum(['ar', 'en']);
+export type SupportedLanguage = z.infer<typeof supportedLanguageSchema>;
+
+// An evidence array is a list of TranscriptSegment IDs. Every
+// evidence-bearing field must resolve to real segments in the same
+// project's transcript — structurally required here (min 1, so
+// nothing is asserted with zero support), and checked for real
+// existence in lib/insights/validate.ts.
+const evidenceSchema = z.array(z.string()).min(1);
+
+const groundedTextSchema = z.object({
+  text: z.string().min(1),
+  evidence: evidenceSchema,
+});
+
+export const editorialThemeSchema = z.object({
+  id: z.string(),
+  label: z.string().min(1),
+  summary: z.string().min(1),
+  evidence: evidenceSchema,
+});
+export type EditorialTheme = z.infer<typeof editorialThemeSchema>;
+
+export const editorialKeyPointSchema = z.object({
+  id: z.string(),
+  text: z.string().min(1),
+  evidence: evidenceSchema,
+});
+export type EditorialKeyPoint = z.infer<typeof editorialKeyPointSchema>;
+
+export const editorialQuoteSchema = z.object({
+  id: z.string(),
+  text: z.string().min(1),
+  evidence: evidenceSchema,
+});
+export type EditorialQuote = z.infer<typeof editorialQuoteSchema>;
+
+export const editorialHookSchema = z.object({
+  id: z.string(),
+  text: z.string().min(1),
+  evidence: evidenceSchema,
+});
+export type EditorialHook = z.infer<typeof editorialHookSchema>;
+
+export const editorialCandidateClipSchema = z.object({
+  id: z.string(),
+  startMs: z.number().int().nonnegative(),
+  endMs: z.number().int().nonnegative(),
+  rationale: z.string().min(1),
+  evidence: evidenceSchema,
+});
+export type EditorialCandidateClip = z.infer<typeof editorialCandidateClipSchema>;
+
+// Claims requiring cautious wording (section 6.4.2): the brief must
+// distinguish what the speaker explicitly said from what the system
+// inferred, and never present inference as fact — `qualification`
+// carries that caveat forward into any downstream draft.
+export const editorialClaimSchema = z.object({
+  id: z.string(),
+  text: z.string().min(1),
+  qualification: z.string().min(1),
+  evidence: evidenceSchema,
+});
+export type EditorialClaim = z.infer<typeof editorialClaimSchema>;
+
+export const editorialCallToActionSchema = z.object({
+  text: z.string().min(1),
+  evidence: evidenceSchema,
+});
+export type EditorialCallToAction = z.infer<typeof editorialCallToActionSchema>;
+
+export const evidenceMapEntrySchema = z.object({
+  segmentIds: z.array(z.string()).min(1),
+  startMs: z.number().int().nonnegative(),
+  endMs: z.number().int().nonnegative(),
+  text: z.string(),
+});
+export type EvidenceMapEntry = z.infer<typeof evidenceMapEntrySchema>;
+
+/**
+ * The canonical Editorial Brief (section 6.4.2): the source-grounded
+ * compiled document every downstream asset (shorts, social posts,
+ * blog, ...) is generated from. Every evidence array must reference
+ * real TranscriptSegment IDs from the same project's transcript —
+ * lib/insights/validate.ts performs that existence check, which this
+ * schema alone can't express structurally.
+ */
+export const editorialBriefSchema = z.object({
+  thesis: groundedTextSchema,
+  audience: z.string(),
+  language: supportedLanguageSchema,
+  themes: z.array(editorialThemeSchema),
+  keyPoints: z.array(editorialKeyPointSchema),
+  quotes: z.array(editorialQuoteSchema),
+  hooks: z.array(editorialHookSchema),
+  candidateClips: z.array(editorialCandidateClipSchema),
+  claims: z.array(editorialClaimSchema),
+  callToAction: editorialCallToActionSchema.nullable(),
+  evidenceMap: z.record(z.string(), evidenceMapEntrySchema),
+  confidenceNotes: z.string(),
+});
+export type EditorialBrief = z.infer<typeof editorialBriefSchema>;
+
+// What a provider is expected to return: everything except
+// evidenceMap, which the orchestrator derives itself from the real
+// TranscriptSegment rows the referenced evidence IDs resolve to. This
+// keeps evidenceMap's timestamps/text trustworthy regardless of what a
+// provider claims, and keeps providers from having to plumb segment
+// lookups through just to echo them back.
+export const editorialBriefDraftSchema = editorialBriefSchema.omit({ evidenceMap: true });
+export type EditorialBriefDraft = z.infer<typeof editorialBriefDraftSchema>;

@@ -48,6 +48,7 @@ enum MediaFileStatus {
 
 enum InsightType {
   theme
+  key_point
   quote
   hook
   clip_candidate
@@ -57,6 +58,7 @@ enum InsightType {
 }
 
 enum ArtifactType {
+  editorial_brief
   blog_post
   social_caption
   title
@@ -232,16 +234,22 @@ model TranscriptSegment {
   @@map("transcript_segments")
 }
 
-// Extracted theme, hook, quote, or candidate moment. Retains references
-// to the exact transcript segments that support it (provenance).
+// Extracted theme, key point, quote, hook, or candidate moment — one
+// atomic, independently queryable item from the Editorial Brief
+// (section 6.4.2). segmentIds is the full evidence set; startMs/endMs
+// is the min/max span across that evidence for timeline display.
+// Retains provenance so "where did this insight come from?" is always
+// answerable without re-running extraction.
 model Insight {
-  id        String      @id @default(cuid())
-  projectId String      @map("project_id")
-  type      InsightType
-  startMs   Int         @map("start_ms")
-  endMs     Int         @map("end_ms")
-  score     Float
-  rationale String
+  id         String      @id @default(cuid())
+  projectId  String      @map("project_id")
+  type       InsightType
+  text       String
+  startMs    Int         @map("start_ms")
+  endMs      Int         @map("end_ms")
+  segmentIds String[]    @map("segment_ids")
+  score      Float?
+  rationale  String?
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 

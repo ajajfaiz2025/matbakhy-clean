@@ -56,7 +56,29 @@ Following the recommended first implementation sequence in
       installed) → (simulated normalized media) → transcribe (mock
       provider) → transcript persisted → project marked `ready`.
 - [ ] 5. Transcript viewer with timestamp navigation.
-- [ ] 6. Schema-validated insight extraction with provenance references.
+- [x] 6. Schema-validated insight extraction with provenance references —
+      `src/domain/schemas.ts` (`editorialBriefSchema`), `lib/insights/*`
+      (provider abstraction: a working mock provider covering Arabic and
+      English, plus an untested OpenAI provider; `allam`/`humain` are
+      recognized as valid future selections that fail loudly rather than
+      silently falling back), `lib/insights/validate.ts` (schema +
+      grounding validation, evidenceMap derived from real segments — never
+      from the provider), `lib/pipeline/extractInsights.ts` (one bounded
+      repair attempt on either validation failure, then fails rather than
+      persisting anything ungrounded), `POST /api/v1/projects/{id}/analysis`,
+      `GET /api/v1/projects/{id}/editorial-brief`. The compiled Editorial
+      Brief is stored as a versioned `ContentArtifact`/`ArtifactVersion`
+      (type `editorial_brief`) — old versions are never overwritten, and
+      re-running with a changed audience produces a new version, while
+      re-running unchanged reuses the same job. Atomic items are also
+      mirrored into `Insight` rows for independent querying. 13 automated
+      tests (`npm test`, Vitest) cover schema/grounding validation, mock
+      extraction for English and Arabic fixtures, invalid-reference
+      rejection, repair-path recovery, version creation, and queue-level
+      idempotency — all passing against a real local Postgres + Redis. Full
+      chain verified live: upload → normalize (simulated, no FFmpeg here) →
+      transcribe (mock) → analyze (mock) → Editorial Brief retrieved via API
+      with every evidence ID resolving to a real transcript segment.
 - [ ] 7. Blog draft + caption set as versioned artifacts.
 - [ ] 8. Deterministic short-video renderer with captions.
 - [ ] 9. ZIP export, job progress, structured logs, failure recovery.
@@ -82,6 +104,18 @@ schedule since they only depend on steps 1–3.
   this environment. Without `OPENAI_API_KEY` set, the pipeline uses the
   deterministic mock provider (`lib/transcription/mockProvider.ts`), which
   does not perform real speech recognition.
+- **Insight-extraction provider**: same situation as transcription —
+  `lib/insights/openaiProvider.ts` is implemented but untested against a
+  real key; the mock provider (`lib/insights/mockProvider.ts`) does not
+  perform real language understanding. No HUMAIN/ALLAM integration exists;
+  `INSIGHT_PROVIDER=allam` is recognized but throws explicitly rather than
+  pretending to work.
+- **Editorial Brief uniqueness**: "one editorial brief per project" is
+  enforced by application logic (find-or-create inside a transaction) in
+  `lib/pipeline/extractInsights.ts`, not by a database constraint — two
+  concurrent first-time analysis runs for the same project could in theory
+  race and create two `ContentArtifact` rows. Low risk in practice since
+  jobs are also deduplicated by idempotency key.
 - **Billing**: `PLAN_LIMITS` in `lib/entitlements.ts` is a hardcoded
   placeholder until step 10 wires up a real subscription-billing provider.
 
@@ -116,6 +150,25 @@ curl -X POST "localhost:3000/api/v1/projects/$PROJECT_ID/transcription" \
 # 6. Poll job status
 curl "localhost:3000/api/v1/jobs/$JOB_ID" \
   -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
+
+# 7. Start insight extraction (requires a transcript; audience is optional
+#    and, if changed, produces a new Editorial Brief version)
+curl -X POST "localhost:3000/api/v1/projects/$PROJECT_ID/analysis" \
+  -H 'content-type: application/json' \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user' \
+  -d '{"audience":"early-stage founders"}'
+
+# 8. Retrieve the Editorial Brief
+curl "localhost:3000/api/v1/projects/$PROJECT_ID/editorial-brief" \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
+```
+
+## Testing
+
+```bash
+npm test   # Vitest — schema/grounding validation, mock-provider EN/AR
+           # fixtures, and pipeline integration tests against the real
+           # DATABASE_URL/REDIS_URL from .env (no mocking of Postgres/Redis)
 ```
 
 ## Learn more (Next.js)
