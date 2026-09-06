@@ -79,7 +79,39 @@ Following the recommended first implementation sequence in
       chain verified live: upload → normalize (simulated, no FFmpeg here) →
       transcribe (mock) → analyze (mock) → Editorial Brief retrieved via API
       with every evidence ID resolving to a real transcript segment.
-- [ ] 7. Blog draft + caption set as versioned artifacts.
+- [x] 7. Blog draft + caption set as versioned artifacts —
+      `src/domain/schemas.ts` (`blogDraftDataSchema`, `socialDraftDataSchema`,
+      `generationSettingsSchema`), `lib/generation/*` (provider abstraction:
+      a working mock provider across blog/X/LinkedIn/Instagram in Arabic and
+      English, an untested OpenAI provider, and a primary/fallback router —
+      `allam`/`humain` fail loudly rather than silently substituting a
+      different model), `lib/generation/validate.ts` (schema + insight-ID
+      grounding, groundingMap derived from real `Insight` rows — never from
+      the provider), `lib/pipeline/generateContent.ts` (one bounded repair
+      attempt, then a provider-level fallback only on an outright provider
+      failure — never to paper over a validation failure),
+      `POST /api/v1/projects/{id}/content`,
+      `POST /api/v1/artifacts/{id}/regenerate`,
+      `GET /api/v1/projects/{id}/artifacts`, `GET /api/v1/artifacts/{id}`,
+      `GET /api/v1/artifacts/{id}/versions`, `PATCH /api/v1/artifacts/{id}`
+      (manual edit as a new version), and a minimal Content Results page at
+      `/projects/{id}/content`. `ContentArtifact` gained `platform`/
+      `language` columns and `ArtifactVersion` gained `tier` (preview/paid —
+      the free-trial integration point, not a paywall) and
+      `sourceBriefVersionId` (traces every generated artifact to the exact
+      Editorial Brief version it came from). Generation is metered through
+      the existing `generation_call` entitlement (`lib/entitlements.ts`) —
+      checked before enqueueing, recorded idempotently after. 25 automated
+      tests (`npm test`) cover blog/X/LinkedIn/Instagram generation in
+      English and Arabic, grounding, invalid insight references, schema
+      validation, regeneration/versioning, idempotency (including a real bug
+      this caught — see below), repair-path recovery, and primary/fallback
+      provider behavior — all passing against a real local Postgres + Redis.
+      Full chain verified live end to end via the actual HTTP API (upload →
+      normalize [simulated] → transcribe → analyze → generate blog + 3
+      social variants → regenerate → manually edit → version history), and
+      the UI was driven with a real headless-Chromium Playwright script
+      (view/edit/save/regenerate all confirmed working, screenshotted).
 - [ ] 8. Deterministic short-video renderer with captions.
 - [ ] 9. ZIP export, job progress, structured logs, failure recovery.
 - [ ] 10. Billing limits + closed beta.
@@ -110,14 +142,26 @@ schedule since they only depend on steps 1–3.
   perform real language understanding. No HUMAIN/ALLAM integration exists;
   `INSIGHT_PROVIDER=allam` is recognized but throws explicitly rather than
   pretending to work.
-- **Editorial Brief uniqueness**: "one editorial brief per project" is
-  enforced by application logic (find-or-create inside a transaction) in
-  `lib/pipeline/extractInsights.ts`, not by a database constraint — two
-  concurrent first-time analysis runs for the same project could in theory
-  race and create two `ContentArtifact` rows. Low risk in practice since
-  jobs are also deduplicated by idempotency key.
+- **Editorial Brief / ContentArtifact uniqueness**: "one artifact per
+  (project, type, platform, language)" is enforced by application logic
+  (find-or-create inside a transaction), not a database constraint — two
+  concurrent first-time generation runs for the same combination could in
+  theory race and create two rows. Low risk in practice since jobs are also
+  deduplicated by idempotency key.
+- **Content-generation provider**: same situation as transcription/insights
+  — `lib/generation/openaiProvider.ts` is implemented but untested against a
+  real key; the mock provider (`lib/generation/mockProvider.ts`) does not
+  perform real writing. No HUMAIN/ALLAM integration exists;
+  `GENERATION_PROVIDER=allam` is recognized but throws explicitly.
+- **Manual edits don't re-validate grounding**: `PATCH /api/v1/artifacts/{id}`
+  saves user-edited text as a new version but keeps the *previous* version's
+  `groundingMap`/`settings` unchanged, on the assumption a light copy-edit
+  doesn't change what the content is grounded in. A edit that changes the
+  substance of a section isn't checked against that assumption.
 - **Billing**: `PLAN_LIMITS` in `lib/entitlements.ts` is a hardcoded
-  placeholder until step 10 wires up a real subscription-billing provider.
+  placeholder until step 10 wires up a real subscription-billing provider;
+  `ArtifactVersion.tier` (preview/paid) is a schema hook for a future
+  paywall, not an enforced one.
 
 ### Trying the upload → project flow locally
 
@@ -161,15 +205,44 @@ curl -X POST "localhost:3000/api/v1/projects/$PROJECT_ID/analysis" \
 # 8. Retrieve the Editorial Brief
 curl "localhost:3000/api/v1/projects/$PROJECT_ID/editorial-brief" \
   -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
+
+# 9. Generate content (artifactType: blog_draft | social_post | caption;
+#    platform required for social_post/caption: x | linkedin | instagram)
+curl -X POST "localhost:3000/api/v1/projects/$PROJECT_ID/content" \
+  -H 'content-type: application/json' \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user' \
+  -d '{"artifactType":"blog_draft","language":"en","tone":"informative"}'
+
+# 10. List / view / regenerate / edit artifacts
+curl "localhost:3000/api/v1/projects/$PROJECT_ID/artifacts" \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
+curl "localhost:3000/api/v1/artifacts/$ARTIFACT_ID" \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
+curl -X POST "localhost:3000/api/v1/artifacts/$ARTIFACT_ID/regenerate" \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user'
+curl -X PATCH "localhost:3000/api/v1/artifacts/$ARTIFACT_ID" \
+  -H 'content-type: application/json' \
+  -H 'x-workspace-id: dev-workspace' -H 'x-user-id: dev-user' \
+  -d '{"data": { /* full BlogDraftData or SocialDraftData shape */ }}'
 ```
+
+Or use the minimal UI at `http://localhost:3000/projects/$PROJECT_ID/content`
+(enter the workspace/user IDs in the header fields — it's a dev-header auth
+stub, same as the API).
 
 ## Testing
 
 ```bash
 npm test   # Vitest — schema/grounding validation, mock-provider EN/AR
-           # fixtures, and pipeline integration tests against the real
-           # DATABASE_URL/REDIS_URL from .env (no mocking of Postgres/Redis)
+           # fixtures across blog/X/LinkedIn/Instagram, and pipeline
+           # integration tests against the real DATABASE_URL/REDIS_URL
+           # from .env (no mocking of Postgres/Redis)
 ```
+
+Note: stop `npm run worker` before running `npm test` — a live worker
+consuming from the same Redis queue will race the test suite's own
+BullMQ jobs (a real worker will pick up and process/lock test-created
+jobs before the test can clean them up).
 
 ## Learn more (Next.js)
 

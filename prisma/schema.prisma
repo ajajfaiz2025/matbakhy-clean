@@ -59,6 +59,9 @@ enum InsightType {
 
 enum ArtifactType {
   editorial_brief
+  blog_draft
+  social_post
+  caption
   blog_post
   social_caption
   title
@@ -76,6 +79,23 @@ enum ArtifactStatus {
   failed
 }
 
+// Platform a social_post/caption artifact was written for. Blog
+// artifacts leave this null.
+enum SocialPlatform {
+  x
+  linkedin
+  instagram
+}
+
+// Integration point for the free-trial/billing system (section 12):
+// no paywall logic is enforced here, but every generated version is
+// tagged so a future entitlement check can filter on it without a
+// schema change.
+enum ArtifactTier {
+  preview
+  paid
+}
+
 enum JobStatus {
   queued
   running
@@ -89,6 +109,7 @@ enum PipelineJobType {
   normalization
   transcription
   analysis
+  generation
 }
 
 enum UsageEventType {
@@ -260,33 +281,46 @@ model Insight {
 // Blog, caption, title, quote, or short-video draft. Immutable
 // ArtifactVersion rows hold the actual generated/edited content.
 model ContentArtifact {
-  id               String         @id @default(cuid())
-  projectId        String         @map("project_id")
+  id               String          @id @default(cuid())
+  projectId        String          @map("project_id")
   type             ArtifactType
-  status           ArtifactStatus @default(draft)
-  sourceRefs       String[]       @map("source_refs")
-  currentVersionId String?        @unique @map("current_version_id")
+  platform         SocialPlatform?
+  language         String
+  status           ArtifactStatus  @default(draft)
+  sourceRefs       String[]        @map("source_refs")
+  currentVersionId String?         @unique @map("current_version_id")
 
-  project        Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project        Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
   versions       ArtifactVersion[] @relation("ArtifactVersions")
   currentVersion ArtifactVersion?  @relation("CurrentVersion", fields: [currentVersionId], references: [id])
   renderJobs     RenderJob[]
 
-  @@index([projectId, type])
+  // One artifact per (project, type, platform, language) — enforced in
+  // application logic (find-or-create inside a transaction), same
+  // simplification as the editorial_brief artifact from step 6.
+  @@index([projectId, type, platform, language])
   @@map("content_artifacts")
 }
 
 model ArtifactVersion {
-  id         String   @id @default(cuid())
-  artifactId String   @map("artifact_id")
-  body       Json
-  parameters Json     @default("{}")
-  model      String?
-  createdBy  String   @map("created_by")
-  createdAt  DateTime @default(now()) @map("created_at")
+  id                  String       @id @default(cuid())
+  artifactId          String       @map("artifact_id")
+  // The specific Editorial Brief version this was generated from
+  // (null for the editorial_brief artifact itself). Lets a generated
+  // artifact be traced back to exactly which brief produced it, even
+  // after the brief is later regenerated.
+  sourceBriefVersionId String?     @map("source_brief_version_id")
+  tier                ArtifactTier @default(preview)
+  body                Json
+  parameters          Json         @default("{}")
+  model               String?
+  createdBy           String       @map("created_by")
+  createdAt           DateTime     @default(now()) @map("created_at")
 
-  artifact ContentArtifact @relation("ArtifactVersions", fields: [artifactId], references: [id], onDelete: Cascade)
-  current  ContentArtifact? @relation("CurrentVersion")
+  artifact        ContentArtifact  @relation("ArtifactVersions", fields: [artifactId], references: [id], onDelete: Cascade)
+  current         ContentArtifact? @relation("CurrentVersion")
+  sourceBriefVersion ArtifactVersion?  @relation("BriefSources", fields: [sourceBriefVersionId], references: [id])
+  generatedFrom      ArtifactVersion[] @relation("BriefSources")
 
   @@index([artifactId])
   @@map("artifact_versions")

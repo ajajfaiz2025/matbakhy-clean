@@ -82,7 +82,7 @@ async function persistEditorialBrief(params: {
     let artifact = await tx.contentArtifact.findFirst({ where: { projectId, type: 'editorial_brief' } });
     if (!artifact) {
       artifact = await tx.contentArtifact.create({
-        data: { projectId, type: 'editorial_brief', status: 'draft', sourceRefs: [] },
+        data: { projectId, type: 'editorial_brief', language: brief.language, status: 'draft', sourceRefs: [] },
       });
     }
 

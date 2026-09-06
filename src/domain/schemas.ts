@@ -358,3 +358,104 @@ export type EditorialBrief = z.infer<typeof editorialBriefSchema>;
 // lookups through just to echo them back.
 export const editorialBriefDraftSchema = editorialBriefSchema.omit({ evidenceMap: true });
 export type EditorialBriefDraft = z.infer<typeof editorialBriefDraftSchema>;
+
+// --- Step 7: content generation (Editorial Brief -> blog/social) ---
+
+export const socialPlatformSchema = z.enum(['x', 'linkedin', 'instagram']);
+export type SocialPlatform = z.infer<typeof socialPlatformSchema>;
+
+export const generationArtifactTypeSchema = z.enum(['blog_draft', 'social_post', 'caption']);
+export type GenerationArtifactType = z.infer<typeof generationArtifactTypeSchema>;
+
+/**
+ * Generation settings (section 6: basic settings now — tone, audience,
+ * language, dialect, platform). A future brand_voice/creator_style
+ * "Content DNA" config can be layered on top of this same request
+ * shape later without a breaking change; it is deliberately not built
+ * here.
+ */
+export const generationSettingsSchema = z.object({
+  tone: z.string().min(1),
+  audience: z.string(),
+  language: supportedLanguageSchema,
+  dialect: z.string().optional(),
+  platform: socialPlatformSchema.nullable(),
+});
+export type GenerationSettings = z.infer<typeof generationSettingsSchema>;
+
+// Evidence here is a list of Insight IDs (not transcript segment IDs
+// directly — those are reachable through the Insight's own
+// segmentIds/startMs/endMs, resolved into groundingMap by the
+// orchestrator, same pattern as editorialBrief.evidenceMap).
+const insightEvidenceSchema = z.array(z.string()).min(1);
+
+// A claim the model considered but could not ground in the Editorial
+// Brief's evidence — flagged instead of silently invented or dropped.
+export const unsupportedClaimSchema = z.object({
+  text: z.string().min(1),
+  note: z.string().min(1),
+});
+export type UnsupportedClaim = z.infer<typeof unsupportedClaimSchema>;
+
+export const blogSectionSchema = z.object({
+  heading: z.string().min(1),
+  body: z.string().min(1),
+  evidence: insightEvidenceSchema,
+});
+export type BlogSection = z.infer<typeof blogSectionSchema>;
+
+/** What a blog-generation provider returns (before grounding enrichment). */
+export const blogDraftDataSchema = z.object({
+  title: z.string().min(1),
+  introduction: z.string().min(1),
+  sections: z.array(blogSectionSchema).min(1),
+  conclusion: z.string().min(1),
+  callToAction: z.object({ text: z.string().min(1), evidence: insightEvidenceSchema }).nullable(),
+  unsupportedClaims: z.array(unsupportedClaimSchema).default([]),
+});
+export type BlogDraftData = z.infer<typeof blogDraftDataSchema>;
+
+/** What a social/caption-generation provider returns, for any platform. */
+export const socialDraftDataSchema = z.object({
+  title: z.string().min(1),
+  hook: z.string().min(1),
+  body: z.string().min(1),
+  callToAction: z.string().nullable(),
+  hashtags: z.array(z.string()),
+  evidence: insightEvidenceSchema,
+  unsupportedClaims: z.array(unsupportedClaimSchema).default([]),
+});
+export type SocialDraftData = z.infer<typeof socialDraftDataSchema>;
+
+export const groundingRefSchema = z.object({
+  insightType: insightTypeSchema,
+  text: z.string(),
+  segmentIds: z.array(z.string()),
+  startMs: z.number().int().nonnegative(),
+  endMs: z.number().int().nonnegative(),
+});
+export type GroundingRef = z.infer<typeof groundingRefSchema>;
+
+/**
+ * The full persisted ArtifactVersion.body for a generated content
+ * artifact: the draft content plus the settings it was generated with
+ * and a groundingMap resolving every referenced Insight ID to its
+ * real source. Mirrors editorialBrief.evidenceMap (step 6), keyed by
+ * Insight ID instead of transcript segment ID, and built by the
+ * orchestrator from real Insight rows — never from the provider.
+ */
+export const blogArtifactBodySchema = z.object({
+  kind: z.literal('blog_draft'),
+  data: blogDraftDataSchema,
+  settings: generationSettingsSchema,
+  groundingMap: z.record(z.string(), groundingRefSchema),
+});
+export type BlogArtifactBody = z.infer<typeof blogArtifactBodySchema>;
+
+export const socialArtifactBodySchema = z.object({
+  kind: z.enum(['social_post', 'caption']),
+  data: socialDraftDataSchema,
+  settings: generationSettingsSchema,
+  groundingMap: z.record(z.string(), groundingRefSchema),
+});
+export type SocialArtifactBody = z.infer<typeof socialArtifactBodySchema>;
