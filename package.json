@@ -12,7 +12,8 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "worker": "tsx watch workers/main.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "validate:real": "tsx scripts/realLlmValidation.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",
