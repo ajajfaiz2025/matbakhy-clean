@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { db } from '../../../../lib/db';
+import { assertProjectLimit, EntitlementError } from '../../../../lib/entitlements';
 import { resolveWorkspaceContext, WorkspaceAuthError } from '../../../../lib/workspace';
 
 // POST /api/v1/projects — create a project from an uploaded or
@@ -27,6 +28,11 @@ export async function POST(request: Request) {
       );
     }
 
+    // "One limited source/project" on the free plan (section 12 / the
+    // quality-gate's free-trial fix). Checked server-side regardless of
+    // which client calls this — there is no client-side-only gate.
+    await assertProjectLimit(context.workspaceId);
+
     const project = await db.project.create({
       data: {
         workspaceId: context.workspaceId,
@@ -39,6 +45,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ project }, { status: 201 });
   } catch (error) {
     if (error instanceof WorkspaceAuthError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    if (error instanceof EntitlementError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
     if (error instanceof z.ZodError) {

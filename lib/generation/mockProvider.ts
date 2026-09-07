@@ -91,34 +91,133 @@ function buildBlogDraft(input: ContentGenerationInput, isArabic: boolean) {
   };
 }
 
+/**
+ * Platform-aware generation (P1 fix, quality-gate section B): X,
+ * LinkedIn, and Instagram get genuinely different editorial treatment
+ * — different anchor insight types, different structure, different CTA
+ * policy, different hashtag conventions — not the same draft with
+ * different character limits pasted on top. Each builder is
+ * deterministic so it's testable without a real LLM.
+ */
 function buildSocialDraft(input: ContentGenerationInput, isArabic: boolean) {
-  const { insights, brief, settings } = input;
-  const hook = byType(insights, 'hook')[0] ?? insights[0];
-  const quote = byType(insights, 'quote')[0] ?? insights[0];
-  const cta = byType(insights, 'call_to_action')[0];
-
-  let body: string;
-  let hashtags: string[] = [];
-
-  if (settings.platform === 'x') {
-    body = truncate(quote.text, 220);
-  } else if (settings.platform === 'linkedin') {
-    body = isArabic
-      ? `[منشور تجريبي] ${quote.text}\n\n${brief.thesis.text}`
-      : `[mock LinkedIn draft] ${quote.text}\n\n${brief.thesis.text}`;
-  } else {
-    body = isArabic ? `[تعليق تجريبي] ${quote.text}` : `[mock caption] ${quote.text}`;
-    hashtags = isArabic ? ['#محتوى', '#نمو'] : ['#content', '#growth'];
+  const { settings } = input;
+  switch (settings.platform) {
+    case 'x':
+      return buildXDraft(input, isArabic);
+    case 'linkedin':
+      return buildLinkedInDraft(input, isArabic);
+    case 'instagram':
+      return buildInstagramDraft(input, isArabic);
+    default:
+      throw new Error(`Social/caption generation requires a platform, got: ${String(settings.platform)}`);
   }
+}
 
-  const evidence = [...new Set([hook.id, quote.id, ...(cta ? [cta.id] : [])])];
+function pickInsight(insights: InsightSummary[], types: string[]): InsightSummary {
+  for (const type of types) {
+    const found = byType(insights, type)[0];
+    if (found) return found;
+  }
+  return insights[0];
+}
+
+// X: hook-first, single sharp thought, terse, no storytelling. A CTA
+// is only included when the brief actually surfaced one — X posts
+// don't manufacture "comment below" filler — and even then it stays
+// as short as the hook itself. One hashtag at most.
+function buildXDraft(input: ContentGenerationInput, isArabic: boolean) {
+  const { insights } = input;
+  const hookInsight = pickInsight(insights, ['hook', 'claim', 'quote']);
+  const supportInsight = pickInsight(insights, ['key_point', 'theme']);
+  const ctaInsight = byType(insights, 'call_to_action')[0];
+
+  const hook = truncate(hookInsight.text, 140);
+  const support =
+    supportInsight.id !== hookInsight.id ? truncate(supportInsight.text, 100) : '';
+  const body = truncate([hook, support].filter(Boolean).join(' — '), 260);
+
+  const evidence = [...new Set([hookInsight.id, supportInsight.id, ...(ctaInsight ? [ctaInsight.id] : [])])];
 
   return {
-    title: `${settings.platform ?? 'social'} draft`,
-    hook: hook.text,
+    title: 'x draft',
+    hook,
     body,
-    callToAction: cta ? cta.text : null,
-    hashtags,
+    callToAction: ctaInsight ? truncate(ctaInsight.text, 60) : null,
+    hashtags: isArabic ? ['#نمو'] : ['#growth'],
+    evidence,
+    unsupportedClaims: [],
+  };
+}
+
+// LinkedIn: a hook, a short narrative paragraph grounded in the
+// thesis, a structured bullet list of key points, and a
+// discussion-inviting CTA — the professional long-form shape, not a
+// truncated tweet.
+function buildLinkedInDraft(input: ContentGenerationInput, isArabic: boolean) {
+  const { insights, brief } = input;
+  const hookInsight = pickInsight(insights, ['claim', 'theme', 'hook']);
+  const keyPoints = byType(insights, 'key_point').slice(0, 3);
+  const points = keyPoints.length > 0 ? keyPoints : [pickInsight(insights, ['theme', 'quote'])];
+  const ctaInsight = byType(insights, 'call_to_action')[0];
+
+  const bulletList = points.map((point) => `• ${point.text}`).join('\n');
+  const body = `${brief.thesis.text}\n\n${bulletList}`;
+
+  const callToAction = ctaInsight
+    ? isArabic
+      ? `${ctaInsight.text} شاركونا رأيكم وتجربتكم في التعليقات.`
+      : `${ctaInsight.text} What's your experience with this? Share it in the comments.`
+    : isArabic
+      ? 'ما رأيكم؟ أنا مهتم بمعرفة تجربتكم في التعليقات.'
+      : "What's your take on this? I'd love to hear your experience in the comments.";
+
+  const evidence = [
+    ...new Set([hookInsight.id, ...points.map((point) => point.id), ...(ctaInsight ? [ctaInsight.id] : [])]),
+  ];
+
+  return {
+    title: 'linkedin draft',
+    hook: truncate(hookInsight.text, 150),
+    body,
+    callToAction,
+    hashtags: isArabic
+      ? ['#قيادة', '#نمو_الأعمال', '#تطوير_المحتوى']
+      : ['#Leadership', '#GrowthStrategy', '#ContentStrategy'],
+    evidence,
+    unsupportedClaims: [],
+  };
+}
+
+// Instagram: emotional/relatable hook with emoji, short storytelling
+// caption anchored on a quote, an engagement-driven CTA (save/tag/
+// share rather than "comment"), and a heavier, casual hashtag block.
+function buildInstagramDraft(input: ContentGenerationInput, isArabic: boolean) {
+  const { insights } = input;
+  const hookInsight = pickInsight(insights, ['quote', 'hook']);
+  const themeInsight = pickInsight(insights, ['theme', 'key_point']);
+  const ctaInsight = byType(insights, 'call_to_action')[0];
+
+  const hook = `✨ ${truncate(hookInsight.text, 120)}`;
+  const body = `${hook}\n\n${themeInsight.text} 💬`;
+
+  const callToAction = ctaInsight
+    ? isArabic
+      ? `${ctaInsight.text} 📌 احفظ هذا المنشور!`
+      : `${ctaInsight.text} 📌 Save this post for later!`
+    : isArabic
+      ? 'احفظ هذا المنشور وشاركه مع صديق يحتاجه! 📌'
+      : 'Save this post and tag a friend who needs to see this! 📌';
+
+  const evidence = [...new Set([hookInsight.id, themeInsight.id, ...(ctaInsight ? [ctaInsight.id] : [])])];
+
+  return {
+    title: 'instagram draft',
+    hook,
+    body,
+    callToAction,
+    hashtags: isArabic
+      ? ['#محتوى', '#نمو', '#إلهام', '#نصائح', '#تطوير_الذات', '#ريادة_اعمال']
+      : ['#content', '#growth', '#inspiration', '#tips', '#mindset', '#entrepreneurship'],
     evidence,
     unsupportedClaims: [],
   };

@@ -1,5 +1,5 @@
 import { db } from '../db';
-import { assertEntitlement, recordUsage } from '../entitlements';
+import { assertEntitlement, assertPlatformLimit, recordUsage } from '../entitlements';
 import { enqueuePipelineJob } from '../queue';
 import { getContentProviders } from './index';
 import type {
@@ -60,6 +60,10 @@ export async function enqueueGenerationJob(params: EnqueueGenerationParams): Pro
   }
 
   await assertEntitlement(workspaceId, 'generation_call', 1);
+  // "One social platform only" (free trial). Checked here so every
+  // caller — the content endpoint, regenerate, and any future direct
+  // API request — goes through the same server-side gate.
+  await assertPlatformLimit(workspaceId, projectId, platform);
 
   const { primary } = getContentProviders();
   const idempotencyKey = [

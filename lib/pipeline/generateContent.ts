@@ -1,8 +1,10 @@
 import type { Job } from 'bullmq';
 import type { Prisma } from '@prisma/client';
 import { db } from '../db';
+import { isPreviewOnlyPlan } from '../entitlements';
 import { getContentProviders, type ContentProviderSelection, type InsightSummary } from '../generation';
 import { validateContentDraft } from '../generation/validate';
+import { applyBlogPreviewRestriction, applySocialPreviewRestriction } from '../generation/previewRestriction';
 import type { ContentGenerationInput } from '../generation/types';
 import {
   editorialBriefSchema,
@@ -44,11 +46,12 @@ export async function generateContent(
 
   const briefArtifact = await db.contentArtifact.findFirst({
     where: { projectId, type: 'editorial_brief' },
-    include: { currentVersion: true },
+    include: { currentVersion: true, project: { select: { workspaceId: true } } },
   });
   if (!briefArtifact?.currentVersion) {
     throw new Error(`Project ${projectId} has no Editorial Brief to generate content from yet.`);
   }
+  const workspaceId = briefArtifact.project.workspaceId;
   const brief = editorialBriefSchema.parse(briefArtifact.currentVersion.body);
 
   const insightRows = await db.insight.findMany({ where: { projectId } });
@@ -92,16 +95,33 @@ export async function generateContent(
     );
   }
 
+  // Free-trial preview restriction (P1 fix, quality-gate section B):
+  // applied only after the full draft has passed grounding validation
+  // above, so a preview is always a genuine, still-grounded subset of
+  // a validated draft — never a separately-generated, weaker one.
+  const previewOnly = await isPreviewOnlyPlan(workspaceId);
+  let finalData: BlogDraftData | SocialDraftData = result.data;
+  let finalGroundingMap = result.groundingMap;
+  if (previewOnly) {
+    const restricted =
+      artifactType === 'blog_draft'
+        ? applyBlogPreviewRestriction(result.data as BlogDraftData, result.groundingMap)
+        : applySocialPreviewRestriction(result.data as SocialDraftData, result.groundingMap);
+    finalData = restricted.data;
+    finalGroundingMap = restricted.groundingMap;
+  }
+
   await persistContentArtifact({
     projectId,
     artifactType,
     platform,
     language,
     settings,
-    data: result.data,
-    groundingMap: result.groundingMap,
+    data: finalData,
+    groundingMap: finalGroundingMap,
     providerName: provider.name,
     sourceBriefVersionId: briefArtifact.currentVersion.id,
+    tier: previewOnly ? 'preview' : 'paid',
   });
 }
 
@@ -115,9 +135,20 @@ async function persistContentArtifact(params: {
   groundingMap: Record<string, GroundingRef>;
   providerName: string;
   sourceBriefVersionId: string;
+  tier: 'preview' | 'paid';
 }) {
-  const { projectId, artifactType, platform, language, settings, data, groundingMap, providerName, sourceBriefVersionId } =
-    params;
+  const {
+    projectId,
+    artifactType,
+    platform,
+    language,
+    settings,
+    data,
+    groundingMap,
+    providerName,
+    sourceBriefVersionId,
+    tier,
+  } = params;
 
   await db.$transaction(async (tx) => {
     let artifact = await tx.contentArtifact.findFirst({
@@ -140,6 +171,7 @@ async function persistContentArtifact(params: {
       data: {
         artifactId: artifact.id,
         sourceBriefVersionId,
+        tier,
         body: body as unknown as Prisma.InputJsonValue,
         parameters: { settings } as unknown as Prisma.InputJsonValue,
         model: providerName,

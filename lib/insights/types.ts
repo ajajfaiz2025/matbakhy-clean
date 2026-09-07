@@ -1,4 +1,4 @@
-import type { SupportedLanguage } from '../../src/domain/schemas';
+import type { EditorialBrief, SupportedLanguage } from '../../src/domain/schemas';
 
 export interface TranscriptSegmentInput {
   id: string;
@@ -34,4 +34,13 @@ export interface InsightExtractionProvider {
   // without a real repair capability can omit this — the orchestrator
   // falls back to calling extract() again.
   repair?(input: InsightExtractionInput, previousOutput: unknown, errors: string[]): Promise<unknown>;
+  // Optional: for long transcripts split into chunks (see ./chunk.ts),
+  // combine the already-validated, chunk-scoped local briefs into one
+  // global draft. Providers without real synthesis can omit this — the
+  // orchestrator falls back to a deterministic merge (./reconcile.ts).
+  reconcile?(input: {
+    localBriefs: EditorialBrief[];
+    language: SupportedLanguage;
+    audience: string;
+  }): Promise<unknown>;
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, describe, expect, it } from 'vitest';
 import { db } from '../../lib/db';
+import { fetchWithTimeout } from '../../lib/providers/fetchWithTimeout';
 import { generateContent } from '../../lib/pipeline/generateContent';
 import { mockContentProvider } from '../../lib/generation/mockProvider';
 import { enqueueGenerationJob } from '../../lib/generation/enqueue';
@@ -226,6 +227,45 @@ describe('generateContent pipeline (real Postgres + Redis)', () => {
     });
     expect(artifact?.status).toBe('ready');
     expect(artifact!.currentVersion!.model).toBe('mock'); // fallback provider's name, not the primary's
+  });
+
+  it('falls back to the secondary provider when the primary times out (real fetchWithTimeout, not a hand-thrown error)', async () => {
+    const { project } = await setupProject();
+    const originalFetch = global.fetch;
+
+    const hangingProvider: ContentGenerationProvider = {
+      name: 'hanging-primary',
+      async generate() {
+        // A real hung upstream request: the mocked fetch never resolves
+        // on its own — only fetchWithTimeout's AbortController forces it.
+        global.fetch = ((_url: string, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              const error = new Error('The operation was aborted');
+              error.name = 'AbortError';
+              reject(error);
+            });
+          })) as unknown as typeof fetch;
+        await fetchWithTimeout('https://example.invalid/hang', {}, 50);
+        throw new Error('unreachable — fetchWithTimeout should have thrown');
+      },
+    };
+
+    try {
+      await generateContent(fakeJob(project.id, { artifactType: 'blog_draft' }), {
+        primary: hangingProvider,
+        fallback: mockContentProvider,
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+
+    const artifact = await db.contentArtifact.findFirst({
+      where: { projectId: project.id, type: 'blog_draft' },
+      include: { currentVersion: true },
+    });
+    expect(artifact?.status).toBe('ready');
+    expect(artifact!.currentVersion!.model).toBe('mock'); // fell back after the real timeout fired
   });
 
   it('throws (rather than fabricating output) when the primary fails and there is no fallback', async () => {

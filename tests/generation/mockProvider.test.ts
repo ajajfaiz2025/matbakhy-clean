@@ -89,3 +89,69 @@ describe('mockContentProvider', () => {
     await expect(mockContentProvider.generate(baseInput({ insights: [] }))).rejects.toThrow();
   });
 });
+
+describe('mockContentProvider platform differentiation (P1 fix)', () => {
+  type SocialData = { hook: string; body: string; callToAction: string | null; hashtags: string[]; evidence: string[] };
+
+  async function generateFor(platform: 'x' | 'linkedin' | 'instagram'): Promise<SocialData> {
+    const raw = await mockContentProvider.generate(
+      baseInput({
+        artifactType: platform === 'instagram' ? 'caption' : 'social_post',
+        settings: { tone: 'neutral', audience: 'founders', language: 'en', platform },
+      })
+    );
+    const result = validateContentDraft(platform === 'instagram' ? 'caption' : 'social_post', raw, insights);
+    if (!result.valid) throw new Error(JSON.stringify(result.failure));
+    return result.data as SocialData;
+  }
+
+  it('produces a materially different hook per platform for the same insight set', async () => {
+    const [x, linkedin, instagram] = await Promise.all([generateFor('x'), generateFor('linkedin'), generateFor('instagram')]);
+    const hooks = new Set([x.hook, linkedin.hook, instagram.hook]);
+    expect(hooks.size).toBe(3); // no two platforms produce the same hook text
+  });
+
+  it('produces a materially different body/structure per platform, not just re-wrapped text', async () => {
+    const [x, linkedin, instagram] = await Promise.all([generateFor('x'), generateFor('linkedin'), generateFor('instagram')]);
+    const bodies = new Set([x.body, linkedin.body, instagram.body]);
+    expect(bodies.size).toBe(3);
+    // LinkedIn is structurally a list-based long-form post; X and Instagram are not.
+    expect(linkedin.body).toContain('•');
+    expect(x.body).not.toContain('•');
+    expect(instagram.body).not.toContain('•');
+  });
+
+  it('applies a different CTA policy per platform (X: terse or none, LinkedIn: discussion, Instagram: save/share)', async () => {
+    const [x, linkedin, instagram] = await Promise.all([generateFor('x'), generateFor('linkedin'), generateFor('instagram')]);
+    expect(linkedin.callToAction).toMatch(/comment|experience/i);
+    expect(instagram.callToAction).toMatch(/save|tag|share/i);
+    if (x.callToAction) {
+      // X's CTA, when present at all, stays terse — nowhere near LinkedIn's discussion-inviting length.
+      expect(x.callToAction.length).toBeLessThan(linkedin.callToAction!.length);
+    }
+  });
+
+  it('uses a different hashtag convention per platform (X: minimal, LinkedIn: few professional, Instagram: many casual)', async () => {
+    const [x, linkedin, instagram] = await Promise.all([generateFor('x'), generateFor('linkedin'), generateFor('instagram')]);
+    expect(x.hashtags.length).toBeLessThanOrEqual(1);
+    expect(linkedin.hashtags.length).toBeGreaterThanOrEqual(2);
+    expect(linkedin.hashtags.length).toBeLessThan(instagram.hashtags.length);
+    expect(instagram.hashtags.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('is deterministic: the same platform + insights always produces the same draft', async () => {
+    const [first, second] = await Promise.all([generateFor('linkedin'), generateFor('linkedin')]);
+    expect(first).toEqual(second);
+  });
+
+  it('stays fully grounded in real insight IDs across all three platforms', async () => {
+    const insightIds = new Set(insights.map((i) => i.id));
+    for (const platform of ['x', 'linkedin', 'instagram'] as const) {
+      const data = await generateFor(platform);
+      expect(data.evidence.length).toBeGreaterThan(0);
+      for (const id of data.evidence) {
+        expect(insightIds.has(id)).toBe(true);
+      }
+    }
+  });
+});

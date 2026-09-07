@@ -71,6 +71,19 @@ class LocalFilesystemStorage implements ObjectStorage {
     return resolved;
   }
 
+  async writeText(storageKey: string, contents: string): Promise<number> {
+    const filePath = this.resolve(storageKey);
+    await mkdir(path.dirname(filePath), { recursive: true });
+    const buffer = Buffer.from(contents, 'utf-8');
+    const handle = await open(filePath, 'w');
+    try {
+      await handle.write(buffer);
+    } finally {
+      await handle.close();
+    }
+    return buffer.byteLength;
+  }
+
   async writeStream(storageKey: string, body: ReadableStream<Uint8Array>): Promise<number> {
     const filePath = this.resolve(storageKey);
     await mkdir(path.dirname(filePath), { recursive: true });

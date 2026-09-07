@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { fetchWithTimeout, getProviderTimeoutMs } from '../providers/fetchWithTimeout';
 import type { TranscriptionProvider } from './types';
 
 /**
@@ -22,11 +23,16 @@ export const openaiTranscriptionProvider: TranscriptionProvider = {
     form.append('response_format', 'verbose_json');
     form.append('timestamp_granularities[]', 'segment');
 
-    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    // Audio upload + transcription can legitimately take longer than a
+    // typical JSON call, hence the higher default (section: real-provider
+    // readiness — a timeout throws into the same job retry/backoff as
+    // any other provider failure, it doesn't add a new retry path).
+    const timeoutMs = getProviderTimeoutMs('TRANSCRIPTION_TIMEOUT_MS', 120_000);
+    const response = await fetchWithTimeout('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
-    });
+    }, timeoutMs);
 
     if (!response.ok) {
       throw new Error(`OpenAI transcription failed: ${response.status} ${await response.text()}`);
