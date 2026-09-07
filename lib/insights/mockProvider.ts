@@ -1,3 +1,4 @@
+import { buildValueWeights, rankCandidateClips } from './candidateClipRanking';
 import { deterministicReconcile } from './reconcile';
 import type { InsightExtractionInput, InsightExtractionProvider, TranscriptSegmentInput } from './types';
 
@@ -52,18 +53,6 @@ export const mockInsightProvider: InsightExtractionProvider = {
       },
     ];
 
-    const candidateClips = [
-      {
-        id: 'clip_1',
-        startMs: longest.startMs,
-        endMs: longest.endMs,
-        rationale: isArabic
-          ? '[تجريبي] أطول مقطع في التفريغ النصي'
-          : '[mock] longest segment in the transcript',
-        evidence: [longest.id],
-      },
-    ];
-
     const claimSegment = sorted.find((segment) => /\d/.test(segment.text));
     const claims = claimSegment
       ? [
@@ -83,6 +72,12 @@ export const mockInsightProvider: InsightExtractionProvider = {
       ctaKeywords.some((keyword) => segment.text.toLowerCase().includes(keyword))
     );
     const callToAction = ctaSegment ? { text: ctaSegment.text, evidence: [ctaSegment.id] } : null;
+
+    // Deterministic, multi-signal candidate-clip selection (P1 fix:
+    // no longer just "longest sentence wins") — grounded in the
+    // insights already extracted above, not a fresh guess.
+    const valueWeights = buildValueWeights({ quotes, claims, keyPoints, hooks, themes, callToAction });
+    const candidateClips = rankCandidateClips(sorted, valueWeights, language, 3);
 
     return {
       thesis: { text: truncate(first.text, 200), evidence: [first.id] },
