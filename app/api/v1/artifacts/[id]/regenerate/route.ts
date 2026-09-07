@@ -38,6 +38,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         { status: 400 }
       );
     }
+    if (artifact.type === 'short_video') {
+      return NextResponse.json(
+        { error: 'Use POST /api/v1/projects/{id}/render to (re-)render a short video — this endpoint is for text content only.' },
+        { status: 400 }
+      );
+    }
 
     const previousSettings = artifact.currentVersion?.body
       ? ((artifact.currentVersion.body as { settings?: GenerationSettings }).settings ?? null)

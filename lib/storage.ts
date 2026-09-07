@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { copyFile, mkdir, open, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 
 /**
  * Object storage abstraction (section 4.1 / 6.1). Production should
@@ -24,6 +26,16 @@ export interface ObjectStorage {
   createUploadSession(params: { workspaceId: string; suggestedName: string }): Promise<UploadSession>;
   head(storageKey: string): Promise<ObjectHead>;
   getSignedDownloadUrl(storageKey: string): Promise<string>;
+  // Persists a file the server already produced locally (e.g. an
+  // FFmpeg render output) under storageKey. A production
+  // implementation would stream-upload from localFilePath instead of
+  // copying to a local root.
+  writeLocalFile(storageKey: string, localFilePath: string): Promise<number>;
+  // Server-side read-back for a stored object, used by the dev-only
+  // download proxy route. A production implementation would not need
+  // this — getSignedDownloadUrl would point directly at the real
+  // object store instead of proxying through the API.
+  readStream(storageKey: string): Promise<{ stream: ReadableStream<Uint8Array>; sizeBytes: number } | null>;
 }
 
 const UPLOAD_TTL_MS = 15 * 60 * 1000;
@@ -101,6 +113,27 @@ class LocalFilesystemStorage implements ObjectStorage {
       await handle.close();
     }
     return bytesWritten;
+  }
+
+  async writeLocalFile(storageKey: string, localFilePath: string): Promise<number> {
+    const filePath = this.resolve(storageKey);
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await copyFile(localFilePath, filePath);
+    const info = await stat(filePath);
+    return info.size;
+  }
+
+  async readStream(storageKey: string): Promise<{ stream: ReadableStream<Uint8Array>; sizeBytes: number } | null> {
+    const filePath = this.resolve(storageKey);
+    let info;
+    try {
+      info = await stat(filePath);
+    } catch {
+      return null;
+    }
+    const nodeStream = createReadStream(filePath);
+    const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
+    return { stream: webStream, sizeBytes: info.size };
   }
 }
 

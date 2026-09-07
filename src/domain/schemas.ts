@@ -177,10 +177,17 @@ export type JobStatus = z.infer<typeof jobStatusSchema>;
 
 export const renderJobSchema = z.object({
   id: z.string(),
+  workspaceId: z.string(),
+  projectId: z.string(),
   artifactId: z.string(),
+  candidateClipId: z.string(),
+  sourceBriefVersionId: z.string(),
+  sourceMediaId: z.string(),
   template: z.string(),
   status: jobStatusSchema,
+  progress: z.number().min(0).max(1),
   outputMediaId: z.string().nullable(),
+  error: z.string().nullable(),
 });
 export type RenderJob = z.infer<typeof renderJobSchema>;
 
@@ -459,3 +466,83 @@ export const socialArtifactBodySchema = z.object({
   groundingMap: z.record(z.string(), groundingRefSchema),
 });
 export type SocialArtifactBody = z.infer<typeof socialArtifactBodySchema>;
+
+// --- Step 8: short-video rendering (CandidateClip -> FFmpeg -> 9:16 MP4) ---
+
+/**
+ * The one deterministic render configuration for MVP (section 3/4 of
+ * the Step 8 spec): no template system, no user-selectable options.
+ * `templateVersion` documents which version of the rendering strategy
+ * produced a given render, since the strategy may evolve later even
+ * though it is never a per-request choice.
+ */
+export const renderConfigSchema = z.object({
+  templateVersion: z.string(),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  fps: z.number().int().positive(),
+  framingStrategy: z.literal('scale-and-center-crop'),
+  videoCodec: z.string(),
+  audioCodec: z.string().nullable(),
+  container: z.literal('mp4'),
+  captionStyle: z.string(),
+});
+export type RenderConfig = z.infer<typeof renderConfigSchema>;
+
+/**
+ * Real, measured output metadata from ffprobe — never assumed. Used
+ * both for the persisted artifact body and for the render_minutes
+ * usage charge (section 8/14: "the render duration charged must
+ * correspond to the actual rendered clip duration").
+ */
+export const renderOutputMetadataSchema = z.object({
+  durationMs: z.number().int().nonnegative(),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  videoCodec: z.string(),
+  audioCodec: z.string().nullable(),
+  hasAudio: z.boolean(),
+  fileSizeBytes: z.number().int().nonnegative(),
+});
+export type RenderOutputMetadata = z.infer<typeof renderOutputMetadataSchema>;
+
+/**
+ * What a rendered short_video ContentArtifact's ArtifactVersion.body
+ * holds. Source-grounded like every other generated artifact:
+ * candidateClipId + sourceBriefVersionId trace back to the exact
+ * pinned Editorial Brief version and clip that produced this render,
+ * and evidence lists the real transcript segment IDs the clip and its
+ * burned-in captions were built from.
+ */
+export const shortVideoArtifactBodySchema = z.object({
+  kind: z.literal('short_video'),
+  title: z.string(),
+  candidateClipId: z.string(),
+  sourceBriefVersionId: z.string(),
+  renderJobId: z.string(),
+  mediaFileId: z.string(),
+  language: supportedLanguageSchema,
+  config: renderConfigSchema,
+  output: renderOutputMetadataSchema,
+  hasCaptions: z.boolean(),
+  // True when the source's native resolution was smaller than the
+  // 1080x1920 target on either axis, so scale-and-crop had to upscale
+  // rather than downscale (section 3: "If the source resolution is
+  // insufficient, handle it gracefully rather than pretending quality
+  // is unchanged") — the render still succeeds, but this is recorded
+  // rather than silently hidden.
+  sourceUpscaled: z.boolean(),
+  evidence: z.array(z.string()).min(1),
+  clipRationale: z.string(),
+  performance: z.object({
+    sourceDurationMs: z.number().int().nonnegative(),
+    renderDurationMs: z.number().int().nonnegative(),
+    processingRatio: z.number().nonnegative(),
+  }),
+});
+export type ShortVideoArtifactBody = z.infer<typeof shortVideoArtifactBodySchema>;
+
+export const startRenderRequestSchema = z.object({
+  candidateClipId: z.string().min(1),
+});
+export type StartRenderRequest = z.infer<typeof startRenderRequestSchema>;

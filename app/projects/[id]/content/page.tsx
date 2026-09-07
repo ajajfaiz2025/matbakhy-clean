@@ -4,16 +4,20 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import type {
   BlogDraftData,
+  EditorialBrief,
   GenerationArtifactType,
   GroundingRef,
+  ShortVideoArtifactBody,
   SocialDraftData,
   SocialPlatform,
   SupportedLanguage,
 } from '../../../../src/domain/schemas';
 
+type ArtifactKind = GenerationArtifactType | 'short_video';
+
 interface ArtifactSummary {
   id: string;
-  type: GenerationArtifactType;
+  type: ArtifactKind;
   platform: SocialPlatform | null;
   language: SupportedLanguage;
   status: string;
@@ -24,18 +28,27 @@ interface ArtifactSummary {
 
 type ArtifactBody =
   | { kind: 'blog_draft'; data: BlogDraftData; groundingMap: Record<string, GroundingRef> }
-  | { kind: 'social_post' | 'caption'; data: SocialDraftData; groundingMap: Record<string, GroundingRef> };
+  | { kind: 'social_post' | 'caption'; data: SocialDraftData; groundingMap: Record<string, GroundingRef> }
+  | ShortVideoArtifactBody;
 
 interface ArtifactDetail {
   id: string;
-  type: GenerationArtifactType;
+  type: ArtifactKind;
   platform: SocialPlatform | null;
   language: SupportedLanguage;
   status: string;
   currentVersionId: string;
   body: ArtifactBody;
+  downloadUrl: string | null;
   model: string | null;
   versions: Array<{ id: string; createdAt: string; createdBy: string }>;
+}
+
+function formatTimestamp(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
 const GENERATION_TARGETS: Array<{
@@ -53,6 +66,14 @@ function isBlog(body: ArtifactDetail['body']): body is { kind: 'blog_draft'; dat
   return body.kind === 'blog_draft';
 }
 
+function isSocial(body: ArtifactDetail['body']): body is { kind: 'social_post' | 'caption'; data: SocialDraftData; groundingMap: Record<string, GroundingRef> } {
+  return body.kind === 'social_post' || body.kind === 'caption';
+}
+
+function isShortVideo(body: ArtifactDetail['body']): body is ShortVideoArtifactBody {
+  return body.kind === 'short_video';
+}
+
 export default function ContentResultsPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
@@ -66,6 +87,7 @@ export default function ContentResultsPage() {
   const [statusMessage, setStatusMessage] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<BlogDraftData | SocialDraftData | null>(null);
+  const [brief, setBrief] = useState<EditorialBrief | null>(null);
 
   const authHeaders = useCallback(
     () => ({ 'content-type': 'application/json', 'x-workspace-id': workspaceId, 'x-user-id': userId }),
@@ -80,10 +102,21 @@ export default function ContentResultsPage() {
     }
     const data = (await res.json()) as { artifacts: ArtifactSummary[] };
     setArtifacts(data.artifacts);
+    setStatusMessage('');
+  }, [projectId, authHeaders]);
+
+  const loadBrief = useCallback(async () => {
+    const res = await fetch(`/api/v1/projects/${projectId}/editorial-brief`, { headers: authHeaders() });
+    if (!res.ok) return; // No brief yet — the Short Videos section just stays empty.
+    const data = (await res.json()) as { brief: EditorialBrief };
+    setBrief(data.brief);
   }, [projectId, authHeaders]);
 
   useEffect(() => {
-    if (projectId) loadArtifacts();
+    if (projectId) {
+      loadArtifacts();
+      loadBrief();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
@@ -99,7 +132,9 @@ export default function ContentResultsPage() {
   }
 
   async function pollJob(jobId: string): Promise<'succeeded' | 'failed' | 'dead_letter' | 'timeout'> {
-    for (let attempt = 0; attempt < 30; attempt += 1) {
+    // 90 attempts at 1s: generous enough for a real FFmpeg render, not
+    // just the near-instant mock text providers.
+    for (let attempt = 0; attempt < 90; attempt += 1) {
       const res = await fetch(`/api/v1/jobs/${jobId}`, { headers: authHeaders() });
       if (res.ok) {
         const { job } = (await res.json()) as { job: { status: string; error: string | null } };
@@ -138,6 +173,30 @@ export default function ContentResultsPage() {
     }
   }
 
+  async function createShort(candidateClipId: string) {
+    const key = `render:${candidateClipId}`;
+    setBusyKey(key);
+    setStatusMessage('Rendering short video…');
+    try {
+      const res = await fetch(`/api/v1/projects/${projectId}/render`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ candidateClipId }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setStatusMessage(body.error ?? `Request failed (${res.status})`);
+        return;
+      }
+      const { jobId } = (await res.json()) as { jobId: string };
+      const outcome = await pollJob(jobId);
+      setStatusMessage(outcome === 'succeeded' ? 'Short video ready.' : `Render ${outcome}.`);
+      await loadArtifacts();
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
   async function regenerate(artifactId: string) {
     setBusyKey(artifactId);
     setStatusMessage('Regenerating…');
@@ -158,6 +217,7 @@ export default function ContentResultsPage() {
   }
 
   function startEdit(detail: ArtifactDetail) {
+    if (isShortVideo(detail.body)) return; // no editor for short videos (Step 8 scope)
     setEditingId(detail.id);
     setEditDraft(structuredClone(detail.body.data));
   }
@@ -205,7 +265,14 @@ export default function ContentResultsPage() {
             <option value="ar">Arabic</option>
           </select>
         </label>
-        <button onClick={loadArtifacts}>Refresh</button>
+        <button
+          onClick={() => {
+            loadArtifacts();
+            loadBrief();
+          }}
+        >
+          Refresh
+        </button>
       </section>
 
       <section style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -219,6 +286,38 @@ export default function ContentResultsPage() {
         })}
       </section>
 
+      <section style={{ marginBottom: 24, border: '1px solid #ddd', borderRadius: 8, padding: 16 }}>
+        <h2 style={{ marginTop: 0, fontSize: 18 }}>Short Videos</h2>
+        {!brief && <p style={{ color: '#888' }}>No Editorial Brief yet — generate one before creating short videos.</p>}
+        {brief && brief.candidateClips.length === 0 && (
+          <p style={{ color: '#888' }}>The current Editorial Brief has no candidate clips.</p>
+        )}
+        {brief && brief.candidateClips.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {brief.candidateClips.map((clip) => {
+              const key = `render:${clip.id}`;
+              return (
+                <div
+                  key={clip.id}
+                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, borderBottom: '1px solid #eee', paddingBottom: 8 }}
+                >
+                  <div>
+                    <div style={{ fontSize: 13 }}>
+                      {formatTimestamp(clip.startMs)} – {formatTimestamp(clip.endMs)}
+                    </div>
+                    <div style={{ fontSize: 13, color: '#555' }}>{clip.rationale}</div>
+                  </div>
+                  {/* Idempotent: re-clicking after a render already exists is a no-op that returns the same job/artifact. */}
+                  <button disabled={busyKey === key} onClick={() => createShort(clip.id)}>
+                    {busyKey === key ? 'Rendering…' : 'Create Short'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       {statusMessage && <p style={{ color: '#333' }}>{statusMessage}</p>}
 
       {artifacts.length === 0 && <p>No content generated yet — pick a button above.</p>}
@@ -227,7 +326,11 @@ export default function ContentResultsPage() {
         {artifacts.map((artifact) => {
           const detail = details[artifact.id];
           const isEditing = editingId === artifact.id;
-          const sourceCount = detail ? Object.keys(detail.body.groundingMap).length : null;
+          const sourceCount = detail
+            ? isShortVideo(detail.body)
+              ? detail.body.evidence.length
+              : Object.keys(detail.body.groundingMap).length
+            : null;
 
           return (
             <div key={artifact.id} style={{ border: '1px solid #ddd', borderRadius: 8, padding: 16 }}>
@@ -242,13 +345,50 @@ export default function ContentResultsPage() {
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={() => loadDetail(artifact.id)}>{detail ? 'Reload' : 'View'}</button>
-                  <button disabled={busyKey === artifact.id} onClick={() => regenerate(artifact.id)}>
-                    {busyKey === artifact.id ? 'Working…' : 'Regenerate'}
-                  </button>
+                  {artifact.type !== 'short_video' && (
+                    <button disabled={busyKey === artifact.id} onClick={() => regenerate(artifact.id)}>
+                      {busyKey === artifact.id ? 'Working…' : 'Regenerate'}
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {detail && !isEditing && (
+              {detail && !isEditing && isShortVideo(detail.body) && (
+                <div style={{ marginTop: 12 }}>
+                  <p style={{ fontSize: 13, color: '#555' }}>Source candidate clip: {detail.body.candidateClipId}</p>
+                  {detail.downloadUrl ? (
+                    // eslint-disable-next-line jsx-a11y/media-has-caption
+                    <video controls style={{ maxWidth: 280, aspectRatio: '9 / 16', background: '#000' }} src={detail.downloadUrl} />
+                  ) : (
+                    <p style={{ color: '#a15c00' }}>No download URL available.</p>
+                  )}
+                  <div style={{ fontSize: 13, marginTop: 8 }}>
+                    <div>Clip rationale: {detail.body.clipRationale}</div>
+                    <div>
+                      Output: {detail.body.output.width}×{detail.body.output.height} · {(detail.body.output.durationMs / 1000).toFixed(1)}s ·{' '}
+                      {detail.body.output.videoCodec}
+                      {detail.body.output.hasAudio ? `/${detail.body.output.audioCodec}` : ' (no audio)'} ·{' '}
+                      {(detail.body.output.fileSizeBytes / (1024 * 1024)).toFixed(2)} MB
+                    </div>
+                    <div>
+                      Processing: {(detail.body.performance.renderDurationMs / 1000).toFixed(1)}s for{' '}
+                      {(detail.body.performance.sourceDurationMs / 1000).toFixed(1)}s of video (ratio{' '}
+                      {detail.body.performance.processingRatio.toFixed(2)}×)
+                    </div>
+                    {detail.body.sourceUpscaled && <div style={{ color: '#a15c00' }}>⚠ Source resolution was smaller than 1080×1920 and was upscaled.</div>}
+                    {detail.downloadUrl && (
+                      <a href={detail.downloadUrl} download style={{ display: 'inline-block', marginTop: 4 }}>
+                        Download MP4
+                      </a>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 12, color: '#888', marginTop: 8 }}>
+                    model: {detail.model ?? 'unknown'} · version {detail.versions.length} of {detail.versions.length}
+                  </div>
+                </div>
+              )}
+
+              {detail && !isEditing && !isShortVideo(detail.body) && (isBlog(detail.body) || isSocial(detail.body)) && (
                 <div style={{ marginTop: 12 }}>
                   {isBlog(detail.body) ? (
                     <div>

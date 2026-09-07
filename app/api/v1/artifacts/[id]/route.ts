@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { db } from '../../../../../lib/db';
+import { storage } from '../../../../../lib/storage';
 import { resolveWorkspaceContext, WorkspaceAuthError } from '../../../../../lib/workspace';
 import { blogDraftDataSchema, socialDraftDataSchema } from '../../../../../src/domain/schemas';
 
@@ -32,6 +33,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       return NextResponse.json({ error: 'Artifact not found' }, { status: 404 });
     }
 
+    // short_video is the one artifact kind whose payload is a stored
+    // file rather than inline text — enrich with a downloadUrl here so
+    // the client doesn't need to know about the storage abstraction.
+    // Every other artifact kind's response is unchanged.
+    let downloadUrl: string | null = null;
+    const rawBody = artifact.currentVersion.body as { kind?: string; mediaFileId?: string };
+    if (rawBody?.kind === 'short_video' && rawBody.mediaFileId) {
+      const mediaFile = await db.mediaFile.findUnique({ where: { id: rawBody.mediaFileId } });
+      if (mediaFile) {
+        downloadUrl = await storage.getSignedDownloadUrl(mediaFile.storageKey);
+      }
+    }
+
     return NextResponse.json({
       id: artifact.id,
       projectId: artifact.projectId,
@@ -41,6 +55,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       status: artifact.status,
       currentVersionId: artifact.currentVersion.id,
       body: artifact.currentVersion.body,
+      downloadUrl,
       model: artifact.currentVersion.model,
       tier: artifact.currentVersion.tier,
       sourceBriefVersionId: artifact.currentVersion.sourceBriefVersionId,

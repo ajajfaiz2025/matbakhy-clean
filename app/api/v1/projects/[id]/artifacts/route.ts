@@ -32,7 +32,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         currentVersionId: artifact.currentVersionId,
         title:
           artifact.currentVersion && typeof artifact.currentVersion.body === 'object'
-            ? (artifact.currentVersion.body as { data?: { title?: string } }).data?.title ?? null
+            ? (() => {
+                const body = artifact.currentVersion!.body as { data?: { title?: string }; title?: string };
+                return body.data?.title ?? body.title ?? null;
+              })()
             : null,
         updatedAt: artifact.currentVersion?.createdAt ?? null,
       })),

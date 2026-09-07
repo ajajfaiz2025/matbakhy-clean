@@ -110,6 +110,7 @@ enum PipelineJobType {
   transcription
   analysis
   generation
+  render
 }
 
 enum UsageEventType {
@@ -142,6 +143,7 @@ model Workspace {
   usageEvents  UsageEvent[]
   exports      Export[]
   pipelineJobs PipelineJob[]
+  renderJobs   RenderJob[]
 
   @@map("workspaces")
 }
@@ -326,17 +328,53 @@ model ArtifactVersion {
   @@map("artifact_versions")
 }
 
-// Requested video or audio transformation for a short-video artifact.
+// Requested video or audio transformation for a short-video artifact
+// (Step 8: CandidateClip -> FFmpeg -> 9:16 MP4). Domain-specific
+// bookkeeping record analogous to Transcript for transcription jobs —
+// the generic PipelineJob row (type "render") is what GET
+// /api/v1/jobs/{id} reads; this table holds what's specific to a
+// render: which candidate clip, from which pinned Editorial Brief
+// version, and with what deterministic config.
 model RenderJob {
-  id            String    @id @default(cuid())
-  artifactId    String    @map("artifact_id")
-  template      String
-  status        JobStatus @default(queued)
-  outputMediaId String?   @map("output_media_id")
+  id       String @id @default(cuid())
+  workspaceId String @map("workspace_id")
+  projectId   String @map("project_id")
+  artifactId  String @map("artifact_id")
 
-  artifact ContentArtifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  // The candidate clip's local id within the pinned Editorial Brief
+  // version (e.g. "clip_1") — only unique within that one brief
+  // version, never globally, so idempotency/lookups always pin
+  // sourceBriefVersionId alongside it (never resolved against
+  // "whatever the current brief is" at render time).
+  candidateClipId      String @map("candidate_clip_id")
+  sourceBriefVersionId String @map("source_brief_version_id")
+  sourceMediaId        String @map("source_media_id")
+
+  // sourceMedia + candidateClip (pinned to a brief version) + the
+  // deterministic render config together define one idempotent render
+  // request — a retried/duplicate request reuses this row instead of
+  // re-rendering.
+  idempotencyKey String @unique @map("idempotency_key")
+  // Deterministic render-strategy version tag (e.g.
+  // "vertical-9x16-v1") — NOT a selectable template; there is exactly
+  // one rendering strategy for MVP. Documents which strategy version
+  // produced this render, since the strategy may evolve later.
+  template String
+  config   Json   @default("{}")
+
+  status        JobStatus @default(queued)
+  progress      Float     @default(0)
+  attempt       Int       @default(0)
+  outputMediaId String?   @map("output_media_id")
+  error         String?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifact  ContentArtifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
 
   @@index([artifactId])
+  @@index([workspaceId])
   @@map("render_jobs")
 }
 
